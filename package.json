@@ -1,0 +1,13 @@
+{
+  "name": "meeting-room-proxy-cancel",
+  "version": "1.0.0",
+  "description": "会議室予約システム：総務部管理者による代理キャンセル API",
+  "main": "server.js",
+  "private": true,
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}
