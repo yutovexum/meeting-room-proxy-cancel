@@ -34,7 +34,6 @@ function getCharacterLength(str) {
 // API1: POST /reservations/:id/cancel-by-admin
 // --------------------------------------------------
 app.post('/reservations/:id/cancel-by-admin', (req, res) => {
-  const receivedAt = new Date().toISOString();
   const rawReservationId = req.params.id;
   const reservationId = Number(rawReservationId);
   const { executorId: rawExecutorId, reason } = req.body || {};
@@ -46,9 +45,8 @@ app.post('/reservations/:id/cancel-by-admin', (req, res) => {
   const reasonLength = getCharacterLength(trimmedReason);
 
   let statusCode = 200;
-  let stopPoint = '';
   let responseMessage = '';
-  let executor; // 判定と成功時処理の両方から参照できるよう外側で宣言
+  let executor;
 
   // --------------------------------------------------
   // 順序厳密判定
@@ -58,35 +56,27 @@ app.post('/reservations/:id/cancel-by-admin', (req, res) => {
   const reservation = reservations.find(r => r.id === reservationId);
   if (!reservation) {
     statusCode = 404;
-    stopPoint = '判定1（対象予約なし）';
     responseMessage = '対象の予約が見つかりません。';
   } else {
     // 2. 実行者の role が ADMIN でない
     executor = users.find(u => u.id === executorId);
     if (!executor || executor.role !== 'ADMIN') {
       statusCode = 403;
-      stopPoint = '判定2（権限なし）';
       responseMessage = '代理キャンセルの権限がありません。';
     } else if (reasonLength === 0) {
       // 3. 理由が未入力（空文字・空白のみを含む）
       statusCode = 400;
-      stopPoint = '判定3（理由未入力）';
       responseMessage = '代理キャンセルの理由を入力してください。';
     } else if (reasonLength > 200) {
       // 4. 理由が200文字を超えている
       statusCode = 400;
-      stopPoint = '判定4（理由200文字超過）';
       responseMessage = '理由は200文字以内で入力してください。';
     } else if (reservation.status !== 'BOOKED') {
       // 5. 予約の status が BOOKED でない
       statusCode = 409;
-      stopPoint = '判定5（ステータス不正）';
       responseMessage = 'この予約はキャンセルできる状態ではありません。';
     }
   }
-
-  // コンソールログ出力（要求3）
-  console.log(`[REQUEST LOG] 日時: ${receivedAt} | 予約ID: ${rawReservationId} | 実行者ID: ${rawExecutorId} | 理由文字数: ${reasonLength}文字 | ステータス: ${statusCode} | 停止判定: ${stopPoint || '成功'}`);
 
   // エラー停止時のレスポンス処理
   if (statusCode !== 200) {
