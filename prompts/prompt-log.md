@@ -11,9 +11,6 @@ AIに渡した指示と、返ってきた内容を順番に記録しています
 ## 1. 実装の依頼
 
 ### 渡した指示
-
-要件定義書 v1.0 の F-4 と s9 をもとに、課題文の条件を整理して、次の指示を作りました。要件定義書と課題文に書かれていないことは入れていません。検証してほしい観点は、要件定義書に書かれていて、間違えやすいところを選んでいます。
-
 ```
 JavaScript（Node.js）で、会議室予約システムの「総務部管理者による代理キャンセル」の API を作成してください。
 
@@ -88,9 +85,213 @@ API2: GET /cancellations
 
 ### 返ってきた内容
 
-【AIが返した解説（検証の5観点の確認・未決事項）をここに貼る】
+'''
+要件に基づいた実装前の検証・解説と、Node.js（Express）による完全な実装コードは以下の通りです。
 
-返ってきたコードは、Express を使って server.js の1ファイルにまとめたものでした。判定順序、理由の扱い、ID の比較、ログは、指示どおりに作られていました。
+1. コード作成前の検証・考察
+提出コードが要件を完全に満たしているか、ご指定の5つのポイントに沿って確認・解説します。
+
+判定順序の厳密な保持
+リクエストハンドラ内で早期リターン（return res.status(...)...）を用いて、指定された1〜5の順番通りに判定を行います。
+
+予約存在確認（404）: まず reservations からIDで検索。該当なし、または数値変換不能な場合は即座に 404 を返します。
+
+権限確認（403）: 実行者を users から取得し、role !== 'ADMIN' であれば即座に 403 を返します（予約が存在しない場合は1で弾かれているため、存在しない予約に対する未権限操作も404が優先されます）。
+
+理由未入力チェック（400）: トリミング後の文字数が0の場合、400 を返します。
+
+理由文字数チェック（400）: サロゲートペア（絵文字等）を考慮してカウントした文字数が200文字を超える場合、400 を返します。
+
+ステータスチェック（409）: 予約の status !== 'BOOKED' の場合、409 を返します。
+
+理由の空白と文字数の境界
+空白の扱い: JavaScript の String.prototype.trim() を使用します。これにより、半角スペースだけでなく全角スペース（\u3000）、タブ、改行コード（\n, \r）等のあらゆるホワイトスペースが除去されます。空文字または空白のみの文字は trim().length === 0 となり、未入力（要件3）として弾かれます。
+
+文字数の境界およびサロゲートペア対応: JavaScript の .length はサロゲートペア（絵文字や一部の拡張漢字など）を 2 とカウントしてしまいます。正確な文字数を数えるため、Unicode コードポイント単位で分割する Array.from(trimmedReason).length または [...trimmedReason].length を使用します。これにより、200文字ちょうどは通過し、201文字以上は要件4で弾かれます。
+
+ID の数値比較
+Express の req.params.id（URLパラメータ）や req.body.executorId は文字列として渡される可能性があります。
+
+Number(req.params.id) および Number(req.body.executorId) で数値化します。
+
+Number("abc") は NaN になります。NaN と数値の比較は常に false となるため、reservations.find(r => r.id === Number("abc")) は undefined を返し、例外を発生させることなく安全に「1. 予約が存在しない（404）」の判定へ進みます。
+
+時間による制限
+予約開始時刻（start_at）と現在時刻の比較など、時間に基づくキャンセル可否チェックは一切記述していません。status === 'BOOKED' のみで判定します。
+
+データの安全な更新
+上述の1〜5のすべての判定をパスした場合にのみ、reservations の status 更新および cancellations へのレコード追加（push）を実行します。途中でエラーレスポンスを返した場合は配列の変更を行いません。
+
+1度成功すると status は 'CANCELED' に変更されるため、同じ予約IDで再度リクエストを送った場合、5番目の判定（status !== 'BOOKED'）に引っかかり 409 エラーとなります。したがって cancellations に重複して記録されることはありません。
+
+2. 実装コード（index.js）
+依存ライブラリとして express を使用します。
+
+JavaScript
+const express = require('express');
+const app = express();
+
+app.use(express.json());
+
+// --------------------------------------------------
+// 初期データ構造（メモリ上保存）
+// --------------------------------------------------
+const users = [
+  { id: 1, name: '山田 太郎', status: 'ACTIVE', role: 'MEMBER' },
+  { id: 2, name: '佐藤 花子', status: 'ACTIVE', role: 'MEMBER' },
+  { id: 3, name: '鈴木 一郎', status: 'ACTIVE', role: 'ADMIN' },
+  { id: 4, name: '田中 次郎', status: 'RETIRED', role: 'ADMIN' }
+];
+
+const reservations = [
+  { id: 1, room_id: 101, start_at: '2026-11-01T10:00:00Z', end_at: '2026-11-01T11:00:00Z', user_id: 1, status: 'BOOKED', created_at: '2026-10-20T00:00:00Z' },
+  { id: 2, room_id: 102, start_at: '2026-11-01T13:00:00Z', end_at: '2026-11-01T14:00:00Z', user_id: 2, status: 'BOOKED', created_at: '2026-10-20T00:00:00Z' },
+  { id: 3, room_id: 101, start_at: '2026-10-25T09:00:00Z', end_at: '2026-10-25T10:00:00Z', user_id: 1, status: 'CANCELED', created_at: '2026-10-19T00:00:00Z' },
+  { id: 4, room_id: 103, start_at: '2026-10-20T10:00:00Z', end_at: '2026-10-20T11:00:00Z', user_id: 2, status: 'IN_USE', created_at: '2026-10-20T00:00:00Z' }
+];
+
+const cancellations = [];
+let nextCancellationId = 1;
+
+// --------------------------------------------------
+// ヘルパー関数: Unicodeコードポイント単位で正確に文字数をカウント
+// --------------------------------------------------
+function getCharacterLength(str) {
+  return Array.from(str).length;
+}
+
+// --------------------------------------------------
+// API1: POST /reservations/:id/cancel-by-admin
+// --------------------------------------------------
+app.post('/reservations/:id/cancel-by-admin', (req, res) => {
+  const receivedAt = new Date().toISOString();
+  const rawReservationId = req.params.id;
+  const reservationId = Number(rawReservationId);
+  const { executorId: rawExecutorId, reason } = req.body || {};
+  const executorId = Number(rawExecutorId);
+
+  // 理由のトリミングと文字数計算
+  const rawReasonStr = typeof reason === 'string' ? reason : '';
+  const trimmedReason = rawReasonStr.trim();
+  const reasonLength = getCharacterLength(trimmedReason);
+
+  let statusCode = 200;
+  let stopPoint = '';
+  let responseMessage = '';
+
+  // --------------------------------------------------
+  // 順序厳密判定
+  // --------------------------------------------------
+
+  // 1. 予約IDが存在しない、または該当する予約が無い
+  const reservation = reservations.find(r => r.id === reservationId);
+  if (!reservation) {
+    statusCode = 404;
+    stopPoint = '判定1（対象予約なし）';
+    responseMessage = '対象の予約が見つかりません。';
+  } else {
+    // 2. 実行者の role が ADMIN でない
+    const executor = users.find(u => u.id === executorId);
+    if (!executor || executor.role !== 'ADMIN') {
+      statusCode = 403;
+      stopPoint = '判定2（権限なし）';
+      responseMessage = '代理キャンセルの権限がありません。';
+    } else if (reasonLength === 0) {
+      // 3. 理由が未入力（空文字・空白のみを含む）
+      statusCode = 400;
+      stopPoint = '判定3（理由未入力）';
+      responseMessage = '代理キャンセルの理由を入力してください。';
+    } else if (reasonLength > 200) {
+      // 4. 理由が200文字を超えている
+      statusCode = 400;
+      stopPoint = '判定4（理由200文字超過）';
+      responseMessage = '理由は200文字以内で入力してください。';
+    } else if (reservation.status !== 'BOOKED') {
+      // 5. 予約の status が BOOKED でない
+      statusCode = 409;
+      stopPoint = '判定5（ステータス不正）';
+      responseMessage = 'この予約はキャンセルできる状態ではありません。';
+    }
+  }
+
+  // コンソールログ出力（要求3）
+  console.log(`[REQUEST LOG] 日時: ${receivedAt} | 予約ID: ${rawReservationId} | 実行者ID: ${rawExecutorId} | 理由文字数: ${reasonLength}文字 | ステータス: ${statusCode} | 停止判定: ${stopPoint || '成功'}`);
+
+  // エラー停止時のレスポンス処理
+  if (statusCode !== 200) {
+    return res.status(statusCode).send(responseMessage);
+  }
+
+  // --------------------------------------------------
+  // 成功時の処理
+  // --------------------------------------------------
+  reservation.status = 'CANCELED';
+
+  cancellations.push({
+    id: nextCancellationId++,
+    reservation_id: reservation.id,
+    canceled_by: executor.id,
+    canceled_at: new Date().toISOString(),
+    is_proxy: true,
+    reason: trimmedReason
+  });
+
+  return res.status(200).send('キャンセルしました。');
+});
+
+// --------------------------------------------------
+// API2: GET /cancellations
+// --------------------------------------------------
+app.get('/cancellations', (req, res) => {
+  const result = cancellations.map(c => ({
+    reservation_id: c.reservation_id,
+    canceled_by: c.canceled_by,
+    canceled_at: c.canceled_at,
+    is_proxy: c.is_proxy,
+    reason: c.reason
+  }));
+
+  return res.status(200).json(result);
+});
+
+// --------------------------------------------------
+// サーバー起動
+// --------------------------------------------------
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Server listening on port ${PORT}`);
+});
+package.json 例
+npm start で起動できるように設定しています。
+
+JSON
+{
+  "name": "meeting-room-proxy-cancel-api",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}
+3. 未決事項
+要件に明記されておらず、独自判断での処理追加を控えた項目は以下の通りです。
+
+退職者（RETIRED）ユーザーによる実行時の扱い
+
+判定仕様として「role が ADMIN であるか」のみが指定されているため、status が RETIRED（例: id 4 の社員）であっても role === 'ADMIN' であれば代理キャンセルを許可（成功）としています。
+
+レスポンス形式（Content-Type）
+
+エラーメッセージおよび成功メッセージの出力形式（text/plain か application/json か）に関する指定が無かったため、指定の文字列テキストをそのまま返却（res.status(...).send('...')）しています。
+
+リクエストボディにおける reason の型（undefined や null）
+
+文字列以外（null や未定義）が送られた場合は、空文字列 "" として処理し、判定3（未入力 400 エラー）に引っかかるように安全側に倒して実装しています。
+'''
+
 
 ### 確認して見つけた不具合
 
@@ -109,17 +310,15 @@ AIの解説では観点の確認がされていましたが、成功する場合
 ### 渡した指示
 
 ```
-いただいたコードを確認したところ、検証を通過したとき（成功時）に必ずエラーになる不具合が見つかりました。修正してください。
+コードを確認したところ、検証を通過したときに必ずエラーになる不具合が見つかったので修正してください。
 
 【不具合の内容】
-* 成功時の処理で `canceled_by: executor.id` を使っていますが、`executor` は `else { ... }` の中で `const` で宣言されています。
-* そのため、成功時の処理からは `executor` を参照できず、「executor is not defined」のエラーになります。
-* エラーは `reservation.status = 'CANCELED'` の直後に起きるので、予約の状態だけが CANCELED に変わり、cancellations には記録が残りません。
-  これは「検証の途中でエラーになった場合、データを一切変更しない」という要件にも反しています。
+- 成功時の処理で `canceled_by: executor.id` を使っていますが、`executor` は `else { ... }` の中で `const` で宣言しています。
+- そのため、成功時の処理からは `executor` を参照できず、「executor is not defined」のエラーになります。
 
 【直し方】
-* `executor` を `if (!reservation) { ... } else { ... }` の外で `let executor;` として宣言し、else の中では代入だけを行う。
-* それ以外の処理（判定の順序・文言・ログ・初期データ）は変えないでください。
+- `executor` を `if (!reservation) { ... } else { ... }` の外で `let executor;` として宣言し、else の中では代入だけを行う。
+- それ以外の処理（判定の順序・文言・ログ・初期データ）は変えないでください。
 
 【修正後に確認してほしいこと】
 修正後のコードについて、次の2つを自然言語で確認してから、コード全文を提示してください。
@@ -133,9 +332,209 @@ AIの解説では観点の確認がされていましたが、成功する場合
 
 ### 返ってきた内容
 
-【AIが返した解説をここに貼る】
+'''
+ご指摘の通り、前回のコードでは executor 変数が else ブロック内で宣言されていたため、成功時の処理部分で参照スコープ外となり ReferenceError: executor is not defined が発生する不具合がありました。
 
-返ってきたコードでは、`let executor;` が if 文の外に足され、else の中は代入だけになっていました。それ以外の判定・文言・ログ・初期データに変更はありませんでした。
+ご指定の修正方針に従い、スコープを修正した内容について以下の通り確認・検証を行いました。
+
+1. 修正内容の検証・確認
+確認1: 予約1に対して「実行者3」「理由『設備点検のため』」で実行した場合の動作
+変数のスコープ: executor を let executor; として if (!reservation) の外側で宣言したため、判定2で代入された executor（id: 3, role: 'ADMIN'）が、その後の成功処理ブロックでも保持・参照されます。
+
+判定通過:
+
+予約1（status: BOOKED）が存在する ➔ 404通過
+
+実行者3（ADMIN）が存在する ➔ 403通過
+
+理由「設備点検のため」（トリミング後7文字） ➔ 理由未入力(400)・200文字超過(400)通過
+
+予約 status は 'BOOKED' ➔ 409通過
+
+成功処理:
+
+statusCode は 200 のまま維持されます。
+
+reservation.status = 'CANCELED' により、予約1の status が 'CANCELED' に更新されます。
+
+cancellations 配列に { id: 1, reservation_id: 1, canceled_by: 3, canceled_at: '...', is_proxy: true, reason: '設備点検のため' } の 1 行が正常に追加されます。
+
+200 ステータスとレスポンス body 'キャンセルしました。' が返ります。
+
+確認2: 成功時の処理の中でエラーが起きうる箇所の有無
+成功処理内で行われている処理を1つずつ検証します。
+
+reservation.status = 'CANCELED': reservation は判定1を通過しており確実にオブジェクトが存在するため、プロパティ代入でエラーは起きません。
+
+nextCancellationId++: スコープ外で数値 1 で初期化された変数であり、インクリメントでエラーは起きません。
+
+reservation.id: reservation オブジェクトのプロパティ参照のため、エラーは起きません。
+
+executor.id: 判定2で executor が存在しかつ role === 'ADMIN' であることを確認しているため、executor は null や undefined にならず、.id 参照でエラーは起きません。
+
+new Date().toISOString(): 標準組み込みメソッドのためエラーは起きません。
+
+trimmedReason: 事前に rawReasonStr.trim() として文字列型から安全に生成されているため、エラーは起きません。
+
+cancellations.push(...): cancellations は配列として初期化されているため、.push() でエラーは起きません。
+
+以上により、成功時の処理でエラーが発生する可能性のある箇所は残っていません。
+
+2. 修正後の完全なコード（server.js）
+エントリーポイントのファイル名を server.js とし、不具合箇所を修正したコード全文です。
+
+JavaScript
+const express = require('express');
+const app = express();
+
+app.use(express.json());
+
+// --------------------------------------------------
+// 初期データ構造（メモリ上保存）
+// --------------------------------------------------
+const users = [
+  { id: 1, name: '山田 太郎', status: 'ACTIVE', role: 'MEMBER' },
+  { id: 2, name: '佐藤 花子', status: 'ACTIVE', role: 'MEMBER' },
+  { id: 3, name: '鈴木 一郎', status: 'ACTIVE', role: 'ADMIN' },
+  { id: 4, name: '田中 次郎', status: 'RETIRED', role: 'ADMIN' }
+];
+
+const reservations = [
+  { id: 1, room_id: 101, start_at: '2026-11-01T10:00:00Z', end_at: '2026-11-01T11:00:00Z', user_id: 1, status: 'BOOKED', created_at: '2026-10-20T00:00:00Z' },
+  { id: 2, room_id: 102, start_at: '2026-11-01T13:00:00Z', end_at: '2026-11-01T14:00:00Z', user_id: 2, status: 'BOOKED', created_at: '2026-10-20T00:00:00Z' },
+  { id: 3, room_id: 101, start_at: '2026-10-25T09:00:00Z', end_at: '2026-10-25T10:00:00Z', user_id: 1, status: 'CANCELED', created_at: '2026-10-19T00:00:00Z' },
+  { id: 4, room_id: 103, start_at: '2026-10-20T10:00:00Z', end_at: '2026-10-20T11:00:00Z', user_id: 2, status: 'IN_USE', created_at: '2026-10-20T00:00:00Z' }
+];
+
+const cancellations = [];
+let nextCancellationId = 1;
+
+// --------------------------------------------------
+// ヘルパー関数: Unicodeコードポイント単位で正確に文字数をカウント
+// --------------------------------------------------
+function getCharacterLength(str) {
+  return Array.from(str).length;
+}
+
+// --------------------------------------------------
+// API1: POST /reservations/:id/cancel-by-admin
+// --------------------------------------------------
+app.post('/reservations/:id/cancel-by-admin', (req, res) => {
+  const receivedAt = new Date().toISOString();
+  const rawReservationId = req.params.id;
+  const reservationId = Number(rawReservationId);
+  const { executorId: rawExecutorId, reason } = req.body || {};
+  const executorId = Number(rawExecutorId);
+
+  // 理由のトリミングと文字数計算
+  const rawReasonStr = typeof reason === 'string' ? reason : '';
+  const trimmedReason = rawReasonStr.trim();
+  const reasonLength = getCharacterLength(trimmedReason);
+
+  let statusCode = 200;
+  let stopPoint = '';
+  let responseMessage = '';
+  let executor; // 判定と成功時処理の両方から参照できるよう外側で宣言
+
+  // --------------------------------------------------
+  // 順序厳密判定
+  // --------------------------------------------------
+
+  // 1. 予約IDが存在しない、または該当する予約が無い
+  const reservation = reservations.find(r => r.id === reservationId);
+  if (!reservation) {
+    statusCode = 404;
+    stopPoint = '判定1（対象予約なし）';
+    responseMessage = '対象の予約が見つかりません。';
+  } else {
+    // 2. 実行者の role が ADMIN でない
+    executor = users.find(u => u.id === executorId);
+    if (!executor || executor.role !== 'ADMIN') {
+      statusCode = 403;
+      stopPoint = '判定2（権限なし）';
+      responseMessage = '代理キャンセルの権限がありません。';
+    } else if (reasonLength === 0) {
+      // 3. 理由が未入力（空文字・空白のみを含む）
+      statusCode = 400;
+      stopPoint = '判定3（理由未入力）';
+      responseMessage = '代理キャンセルの理由を入力してください。';
+    } else if (reasonLength > 200) {
+      // 4. 理由が200文字を超えている
+      statusCode = 400;
+      stopPoint = '判定4（理由200文字超過）';
+      responseMessage = '理由は200文字以内で入力してください。';
+    } else if (reservation.status !== 'BOOKED') {
+      // 5. 予約の status が BOOKED でない
+      statusCode = 409;
+      stopPoint = '判定5（ステータス不正）';
+      responseMessage = 'この予約はキャンセルできる状態ではありません。';
+    }
+  }
+
+  // コンソールログ出力（要求3）
+  console.log(`[REQUEST LOG] 日時: ${receivedAt} | 予約ID: ${rawReservationId} | 実行者ID: ${rawExecutorId} | 理由文字数: ${reasonLength}文字 | ステータス: ${statusCode} | 停止判定: ${stopPoint || '成功'}`);
+
+  // エラー停止時のレスポンス処理
+  if (statusCode !== 200) {
+    return res.status(statusCode).send(responseMessage);
+  }
+
+  // --------------------------------------------------
+  // 成功時の処理
+  // --------------------------------------------------
+  reservation.status = 'CANCELED';
+
+  cancellations.push({
+    id: nextCancellationId++,
+    reservation_id: reservation.id,
+    canceled_by: executor.id,
+    canceled_at: new Date().toISOString(),
+    is_proxy: true,
+    reason: trimmedReason
+  });
+
+  return res.status(200).send('キャンセルしました。');
+});
+
+// --------------------------------------------------
+// API2: GET /cancellations
+// --------------------------------------------------
+app.get('/cancellations', (req, res) => {
+  const result = cancellations.map(c => ({
+    reservation_id: c.reservation_id,
+    canceled_by: c.canceled_by,
+    canceled_at: c.canceled_at,
+    is_proxy: c.is_proxy,
+    reason: c.reason
+  }));
+
+  return res.status(200).json(result);
+});
+
+// --------------------------------------------------
+// サーバー起動
+// --------------------------------------------------
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Server listening on port ${PORT}`);
+});
+3. package.json
+ご指定のスクリプト指定（"start": "node server.js"）を含めた package.json です。
+
+JSON
+{
+  "name": "meeting-room-proxy-cancel-api",
+  "version": "1.0.0",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}
+'''
+
 
 ### 修正後の確認
 
@@ -154,22 +553,147 @@ AIの解説では観点の確認がされていましたが、成功する場合
 ### 渡した指示
 
 ```
-提出前のセルフチェックで、「書いていない機能を足していない（通知・ログ出力・変更機能など）」に当たる処理が見つかりました。修正してください。
+提出前のセルフチェックで、「書いていない機能を足していない（通知・ログ出力・変更機能など）」という項目があったので修正してください。
 
 【修正内容】
-* リクエストごとにコンソールへ出力している `[REQUEST LOG]` の console.log を削除する。
-* それに伴って使われなくなる変数（receivedAt・stopPoint）も削除する。
-* 判定の順序・文言・成功時の処理・初期データは変えないでください。
-* サーバー起動時の `Server listening on port ...` の1行は残してください。
+- リクエストごとにコンソールへ出力している `[REQUEST LOG]` の console.log を削除する。
+- それに伴って使われなくなる変数（receivedAt・stopPoint）も削除してください。
+- 判定の順序・文言・成功時の処理・初期データは変えないでください。
+- サーバー起動時の1行は残してください。
 
 修正後のコード全文を提示してください。
 ```
 
 ### 返ってきた内容
+'''
+指示通り、リクエスト時のコンソールログ出力（[REQUEST LOG]）およびそれに伴い不要となった変数（receivedAt、stopPoint）を削除し、その他の条件・処理は維持した修正コードです。
 
-【AIが返した解説をここに貼る】
+JavaScript
+const express = require('express');
+const app = express();
 
-`git diff` で確かめたところ、`[REQUEST LOG]` の console.log と、receivedAt・stopPoint の行だけが消えていました。判定の順序・文言・成功時の処理・初期データは変わっていませんでした。ほかに、`let executor;` の横の説明コメントと、ファイル末尾の改行が消えていましたが、動きには影響しません。
+app.use(express.json());
+
+// --------------------------------------------------
+// 初期データ構造（メモリ上保存）
+// --------------------------------------------------
+const users = [
+  { id: 1, name: '山田 太郎', status: 'ACTIVE', role: 'MEMBER' },
+  { id: 2, name: '佐藤 花子', status: 'ACTIVE', role: 'MEMBER' },
+  { id: 3, name: '鈴木 一郎', status: 'ACTIVE', role: 'ADMIN' },
+  { id: 4, name: '田中 次郎', status: 'RETIRED', role: 'ADMIN' }
+];
+
+const reservations = [
+  { id: 1, room_id: 101, start_at: '2026-11-01T10:00:00Z', end_at: '2026-11-01T11:00:00Z', user_id: 1, status: 'BOOKED', created_at: '2026-10-20T00:00:00Z' },
+  { id: 2, room_id: 102, start_at: '2026-11-01T13:00:00Z', end_at: '2026-11-01T14:00:00Z', user_id: 2, status: 'BOOKED', created_at: '2026-10-20T00:00:00Z' },
+  { id: 3, room_id: 101, start_at: '2026-10-25T09:00:00Z', end_at: '2026-10-25T10:00:00Z', user_id: 1, status: 'CANCELED', created_at: '2026-10-19T00:00:00Z' },
+  { id: 4, room_id: 103, start_at: '2026-10-20T10:00:00Z', end_at: '2026-10-20T11:00:00Z', user_id: 2, status: 'IN_USE', created_at: '2026-10-20T00:00:00Z' }
+];
+
+const cancellations = [];
+let nextCancellationId = 1;
+
+// --------------------------------------------------
+// ヘルパー関数: Unicodeコードポイント単位で正確に文字数をカウント
+// --------------------------------------------------
+function getCharacterLength(str) {
+  return Array.from(str).length;
+}
+
+// --------------------------------------------------
+// API1: POST /reservations/:id/cancel-by-admin
+// --------------------------------------------------
+app.post('/reservations/:id/cancel-by-admin', (req, res) => {
+  const rawReservationId = req.params.id;
+  const reservationId = Number(rawReservationId);
+  const { executorId: rawExecutorId, reason } = req.body || {};
+  const executorId = Number(rawExecutorId);
+
+  // 理由のトリミングと文字数計算
+  const rawReasonStr = typeof reason === 'string' ? reason : '';
+  const trimmedReason = rawReasonStr.trim();
+  const reasonLength = getCharacterLength(trimmedReason);
+
+  let statusCode = 200;
+  let responseMessage = '';
+  let executor;
+
+  // --------------------------------------------------
+  // 順序厳密判定
+  // --------------------------------------------------
+
+  // 1. 予約IDが存在しない、または該当する予約が無い
+  const reservation = reservations.find(r => r.id === reservationId);
+  if (!reservation) {
+    statusCode = 404;
+    responseMessage = '対象の予約が見つかりません。';
+  } else {
+    // 2. 実行者の role が ADMIN でない
+    executor = users.find(u => u.id === executorId);
+    if (!executor || executor.role !== 'ADMIN') {
+      statusCode = 403;
+      responseMessage = '代理キャンセルの権限がありません。';
+    } else if (reasonLength === 0) {
+      // 3. 理由が未入力（空文字・空白のみを含む）
+      statusCode = 400;
+      responseMessage = '代理キャンセルの理由を入力してください。';
+    } else if (reasonLength > 200) {
+      // 4. 理由が200文字を超えている
+      statusCode = 400;
+      responseMessage = '理由は200文字以内で入力してください。';
+    } else if (reservation.status !== 'BOOKED') {
+      // 5. 予約の status が BOOKED でない
+      statusCode = 409;
+      responseMessage = 'この予約はキャンセルできる状態ではありません。';
+    }
+  }
+
+  // エラー停止時のレスポンス処理
+  if (statusCode !== 200) {
+    return res.status(statusCode).send(responseMessage);
+  }
+
+  // --------------------------------------------------
+  // 成功時の処理
+  // --------------------------------------------------
+  reservation.status = 'CANCELED';
+
+  cancellations.push({
+    id: nextCancellationId++,
+    reservation_id: reservation.id,
+    canceled_by: executor.id,
+    canceled_at: new Date().toISOString(),
+    is_proxy: true,
+    reason: trimmedReason
+  });
+
+  return res.status(200).send('キャンセルしました。');
+});
+
+// --------------------------------------------------
+// API2: GET /cancellations
+// --------------------------------------------------
+app.get('/cancellations', (req, res) => {
+  const result = cancellations.map(c => ({
+    reservation_id: c.reservation_id,
+    canceled_by: c.canceled_by,
+    canceled_at: c.canceled_at,
+    is_proxy: c.is_proxy,
+    reason: c.reason
+  }));
+
+  return res.status(200).json(result);
+});
+
+// --------------------------------------------------
+// サーバー起動
+// --------------------------------------------------
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Server listening on port ${PORT}`);
+});
+'''
 
 ### 修正後の確認
 
